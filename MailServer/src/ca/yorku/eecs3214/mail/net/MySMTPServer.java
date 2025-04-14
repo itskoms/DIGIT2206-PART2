@@ -10,6 +10,7 @@ import java.net.Socket;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 public class MySMTPServer extends Thread {
 
@@ -22,9 +23,10 @@ public class MySMTPServer extends Thread {
     private boolean waitingForData = false;
     private final StringBuilder messageData = new StringBuilder();
     private boolean isQuit = false;
+    private boolean isHeloReceived = false;
 
-
-    // TODO Additional properties, if needed
+    // Email address pattern for validation
+    private static final Pattern EMAIL_PATTERN = Pattern.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
 
     /**
      * Initializes an object responsible for a connection to an individual client.
@@ -47,28 +49,25 @@ public class MySMTPServer extends Thread {
     @Override
     public void run() {
         try (this.socket) {
-
-            socketOut.println("220 Welcome to MySMTPServer");
+            socketOut.println("220 " + getHostName() + " SMTP server ready");
 
             String inputLine;
-
-
             while ((inputLine = socketIn.readLine()) != null && !isQuit) {
                 if (inputLine.trim().isEmpty()) {
                     continue;
                 }
 
-
-                System.out.println("Received" + inputLine);
-
-                String command = inputLine.trim().toUpperCase();
-
-                String response = handleCommand(command);
+                System.out.println("Received: " + inputLine);
+                String response = handleCommand(inputLine);
                 socketOut.println(response);
 
-                // Exit if QUIT command is received
-                if (command.startsWith("QUIT")) {
-                    isQuit = true;
+                if (waitingForData) {
+                    handleData(inputLine);
+                }
+                
+                if (isQuit) {
+                    socket.close();
+                    return;
                 }
             }
 
@@ -78,54 +77,190 @@ public class MySMTPServer extends Thread {
         }
     }
 
+    private boolean isUnsupportedCommand(String command) {
+        // List of known SMTP commands that we don't support
+        String[] unsupportedCommands = {
+            "EXPN", "HELP", "AUTH", "STARTTLS", "TURN", "SOML", "SEND", "SAML"
+        };
+        
+        for (String unsupported : unsupportedCommands) {
+            if (command.equalsIgnoreCase(unsupported)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String handleCommand(String inputLine) {
         String[] parts = inputLine.trim().split("\\s+", 2);
         String command = parts[0].toUpperCase();
         String argument = parts.length > 1 ? parts[1].trim() : null;
 
+        // Special handling for VRFY - always allowed
+        if (command.equals("VRFY")) {
+            if (argument == null || argument.isEmpty()) {
+                return "501 Syntax: VRFY <address>";
+            }
+            String vrfyAddress = extractEmailAddress(argument);
+            if (vrfyAddress == null) {
+                return "501 Syntax error in parameters or arguments";
+            }
+            return Mailbox.isValidUser(vrfyAddress) ? "250 " + vrfyAddress : "550 User not found";
+        }
+
+        // Check for HELO/EHLO requirement for MAIL command
+        if (command.equals("MAIL")) {
+            if (!isHeloReceived) {
+                return "503 Bad sequence of commands";
+            }
+            if (!inputLine.toUpperCase().startsWith("MAIL FROM:")) {
+                return "501 Syntax: MAIL FROM:<address>";
+            }
+            String mailArg = inputLine.substring("MAIL FROM:".length()).trim();
+            String fromAddress = extractEmailAddress(mailArg);
+            if (fromAddress == null) {
+                return "501 Syntax error in parameters or arguments";
+            }
+            sender = fromAddress;
+            return "250 OK";
+        }
+
+        // Check for RCPT command
+        if (command.equals("RCPT")) {
+            if (!isHeloReceived) {
+                return "503 Bad sequence of commands";
+            }
+            if (sender == null) {
+                return "503 Need MAIL before RCPT";
+            }
+            if (!inputLine.toUpperCase().startsWith("RCPT TO:")) {
+                return "501 Syntax: RCPT TO:<address>";
+            }
+            String toAddress = extractEmailAddress(argument);
+            if (toAddress == null) {
+                return "501 Syntax error in parameters or arguments";
+            }
+            if (!Mailbox.isValidUser(toAddress)) {
+                return "550 No such user here";
+            }
+            recipients.add(toAddress);
+            return "250 OK";
+        }
+
+        // Check for DATA command
+        if (command.equals("DATA")) {
+            if (!isHeloReceived) {
+                return "503 Bad sequence of commands";
+            }
+            if (sender == null) {
+                return "503 Need MAIL before DATA";
+            }
+            if (recipients.isEmpty()) {
+                return "503 Need RCPT before DATA";
+            }
+            waitingForData = true;
+            return "354 Start mail input; end with <CRLF>.<CRLF>";
+        }
+
+        if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") && 
+            !command.equals("QUIT") && !command.equals("NOOP")) {
+            return "503 Bad sequence of commands";
+        }
+
         switch (command) {
             case "HELO":
             case "EHLO":
-                return "250 Hello " + getHostName();
-
-            case "MAIL":
-                return inputLine.toUpperCase().startsWith("MAIL FROM:") ? "250 OK" : "501 Syntax error in parameters or arguments";
-
-            case "RCPT":
-                return inputLine.toUpperCase().startsWith("RCPT TO:") ? "250 OK" : "501 Syntax error in parameters or arguments";
-
-            case "DATA":
-                return "354 Start mail input; end with <CRLF>.<CRLF>";
+                if (argument == null || argument.isEmpty()) {
+                    return "501 Syntax: HELO/EHLO hostname";
+                }
+                isHeloReceived = true;
+                return "250 " + getHostName() + " Hello " + argument;
 
             case "NOOP":
                 return "250 OK";
 
             case "QUIT":
-                return "221 Bye";
+                isQuit = true;
+                return "221 " + getHostName() + " closing connection";
 
             case "RSET":
-                sender = null;
-                recipients.clear();
-                messageData.setLength(0);
-                waitingForData = false;
+                resetState();
                 return "250 OK";
 
-            case "VRFY":
-                if (argument == null || argument.isEmpty()) {
-                    return "501 Syntax error in parameters or arguments";
-                } else if (isValidUser(argument)) {
-                    return "250 " + argument;
-                } else {
-                    return "550 User not found";
-                }
-
             default:
-                // 502 for unsupported, 500 for unrecognized commands
-                return isRecognizedButUnsupported(command) ? "502 Command not implemented" : "500 Command not recognized";
+                return isUnsupportedCommand(command) ? "502 Command not implemented" : "500 Command not recognized";
         }
     }
 
+    private void handleData(String inputLine) {
+        if (inputLine.equals(".")) {
+            try {
+                // Create mailboxes for recipients and write the message
+                List<Mailbox> recipientMailboxes = new ArrayList<>();
+                for (String recipient : recipients) {
+                    try {
+                        recipientMailboxes.add(new Mailbox(recipient));
+                    } catch (Mailbox.InvalidUserException e) {
+                        System.err.println("Error creating mailbox for recipient " + recipient + ": " + e.getMessage());
+                        socketOut.println("451 Requested action aborted: invalid recipient");
+                        return;
+                    }
+                }
+                
+                // Write the complete message including headers
+                try (MailWriter writer = new MailWriter(recipientMailboxes)) {
+                    // Write the message headers
+                    writer.write("From: " + sender + "\r\n");
+                    writer.write("To: " + String.join(", ", recipients) + "\r\n");
+                    writer.write("Date: " + new java.util.Date() + "\r\n");
+                    writer.write("\r\n"); // Empty line separating headers from body
+                    
+                    // Write the message body
+                    writer.write(messageData.toString());
+                }
+                
+                // Reset state after successful message storage
+                waitingForData = false;
+                messageData.setLength(0);
+                socketOut.println("250 OK");
+            } catch (Exception e) {
+                System.err.println("Error saving message: " + e.getMessage());
+                socketOut.println("451 Requested action aborted: local error in processing");
+            }
+        } else {
+            // Handle dot-stuffing (RFC 5321 Section 4.5.2)
+            if (inputLine.startsWith("..")) {
+                inputLine = inputLine.substring(1);
+            }
+            messageData.append(inputLine).append("\r\n");
+        }
+    }
 
+    private String extractEmailAddress(String argument) {
+        if (argument == null) return null;
+        
+        // Remove MAIL FROM: or RCPT TO: prefix if present
+        argument = argument.replaceAll("^(?i)(MAIL FROM:|RCPT TO:)\\s*", "");
+        
+        // Extract email address from <address> format
+        if (argument.startsWith("<") && argument.endsWith(">")) {
+            argument = argument.substring(1, argument.length() - 1);
+        }
+        
+        // Validate email format
+        if (!EMAIL_PATTERN.matcher(argument).matches()) {
+            return null;
+        }
+        
+        return argument;
+    }
+
+    private void resetState() {
+        sender = null;
+        recipients.clear();
+        messageData.setLength(0);
+        waitingForData = false;
+    }
 
     /**
      * Retrieves the name of the current host. Used in the response of commands like HELO and EHLO.
