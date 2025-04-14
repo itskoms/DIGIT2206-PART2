@@ -17,6 +17,13 @@ public class MySMTPServer extends Thread {
     private final BufferedReader socketIn;
     private final PrintWriter socketOut;
 
+    private String sender = null;
+    private final List<String> recipients = new ArrayList<>();
+    private boolean waitingForData = false;
+    private final StringBuilder messageData = new StringBuilder();
+    private boolean isQuit = false;
+
+
     // TODO Additional properties, if needed
 
     /**
@@ -41,13 +48,84 @@ public class MySMTPServer extends Thread {
     public void run() {
         try (this.socket) {
 
-            // TODO Complete this method
+            socketOut.println("220 Welcome to MySMTPServer");
+
+            String inputLine;
+
+
+            while ((inputLine = socketIn.readLine()) != null && !isQuit) {
+                if (inputLine.trim().isEmpty()) {
+                    continue;
+                }
+
+
+                System.out.println("Received" + inputLine);
+
+                String command = inputLine.trim().toUpperCase();
+
+                String response = handleCommand(command);
+                socketOut.println(response);
+
+                // Exit if QUIT command is received
+                if (command.startsWith("QUIT")) {
+                    isQuit = true;
+                }
+            }
 
         } catch (IOException e) {
             System.err.println("Error in client's connection handling.");
             e.printStackTrace();
         }
     }
+
+    private String handleCommand(String inputLine) {
+        String[] parts = inputLine.trim().split("\\s+", 2);
+        String command = parts[0].toUpperCase();
+        String argument = parts.length > 1 ? parts[1].trim() : null;
+
+        switch (command) {
+            case "HELO":
+            case "EHLO":
+                return "250 Hello " + getHostName();
+
+            case "MAIL":
+                return inputLine.toUpperCase().startsWith("MAIL FROM:") ? "250 OK" : "501 Syntax error in parameters or arguments";
+
+            case "RCPT":
+                return inputLine.toUpperCase().startsWith("RCPT TO:") ? "250 OK" : "501 Syntax error in parameters or arguments";
+
+            case "DATA":
+                return "354 Start mail input; end with <CRLF>.<CRLF>";
+
+            case "NOOP":
+                return "250 OK";
+
+            case "QUIT":
+                return "221 Bye";
+
+            case "RSET":
+                sender = null;
+                recipients.clear();
+                messageData.setLength(0);
+                waitingForData = false;
+                return "250 OK";
+
+            case "VRFY":
+                if (argument == null || argument.isEmpty()) {
+                    return "501 Syntax error in parameters or arguments";
+                } else if (isValidUser(argument)) {
+                    return "250 " + argument;
+                } else {
+                    return "550 User not found";
+                }
+
+            default:
+                // 502 for unsupported, 500 for unrecognized commands
+                return isRecognizedButUnsupported(command) ? "502 Command not implemented" : "500 Command not recognized";
+        }
+    }
+
+
 
     /**
      * Retrieves the name of the current host. Used in the response of commands like HELO and EHLO.
