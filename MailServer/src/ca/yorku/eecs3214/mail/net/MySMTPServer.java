@@ -113,10 +113,10 @@ public class MySMTPServer extends Thread {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
             }
-            if (!inputLine.toUpperCase().startsWith("MAIL FROM:")) {
+            if (argument == null || !argument.toUpperCase().startsWith("FROM:")) {
                 return "501 Syntax: MAIL FROM:<address>";
             }
-            String mailArg = inputLine.substring("MAIL FROM:".length()).trim();
+            String mailArg = argument.substring("FROM:".length()).trim();
             String fromAddress = extractEmailAddress(mailArg);
             if (fromAddress == null) {
                 return "501 Syntax error in parameters or arguments";
@@ -133,10 +133,10 @@ public class MySMTPServer extends Thread {
             if (sender == null) {
                 return "503 Need MAIL before RCPT";
             }
-            if (!inputLine.toUpperCase().startsWith("RCPT TO:")) {
+            if (argument == null || !argument.toUpperCase().startsWith("TO:")) {
                 return "501 Syntax: RCPT TO:<address>";
             }
-            String toAddress = extractEmailAddress(argument);
+            String toAddress = extractEmailAddress(argument.substring("TO:".length()).trim());
             if (toAddress == null) {
                 return "501 Syntax error in parameters or arguments";
             }
