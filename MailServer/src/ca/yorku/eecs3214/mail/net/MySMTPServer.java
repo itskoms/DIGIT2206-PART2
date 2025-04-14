@@ -83,6 +83,77 @@ public class MySMTPServer extends Thread {
         String command = parts[0].toUpperCase();
         String argument = parts.length > 1 ? parts[1].trim() : null;
 
+        // Special handling for VRFY - always allowed
+        if (command.equals("VRFY")) {
+            if (argument == null || argument.isEmpty()) {
+                return "501 Syntax: VRFY <address>";
+            }
+            String vrfyAddress = extractEmailAddress(argument);
+            if (vrfyAddress == null) {
+                return "501 Syntax error in parameters or arguments";
+            }
+            return Mailbox.isValidUser(vrfyAddress) ? "250 " + vrfyAddress : "550 User not found";
+        }
+
+        // Check for HELO/EHLO requirement for MAIL command
+        if (command.equals("MAIL")) {
+            if (!isHeloReceived) {
+                return "503 Bad sequence of commands";
+            }
+            if (argument == null || !argument.toUpperCase().startsWith("FROM:")) {
+                return "501 Syntax: MAIL FROM:<address>";
+            }
+            String mailArg = argument.substring("FROM:".length()).trim();
+            String fromAddress = extractEmailAddress(mailArg);
+            if (fromAddress == null) {
+                return "501 Syntax error in parameters or arguments";
+            }
+            sender = fromAddress;
+            return "250 OK";
+        }
+
+        // Check for RCPT command
+        if (command.equals("RCPT")) {
+            if (!isHeloReceived) {
+                return "503 Bad sequence of commands";
+            }
+            if (sender == null) {
+                return "503 Need MAIL before RCPT";
+            }
+            if (argument == null || !argument.toUpperCase().startsWith("TO:")) {
+                return "501 Syntax: RCPT TO:<address>";
+            }
+            String toAddress = extractEmailAddress(argument.substring("TO:".length()).trim());
+            if (toAddress == null) {
+                return "501 Syntax error in parameters or arguments";
+            }
+            if (!Mailbox.isValidUser(toAddress)) {
+                return "550 No such user here";
+            }
+            recipients.add(toAddress);
+            return "250 OK";
+        }
+
+        // Check for DATA command
+        if (command.equals("DATA")) {
+            if (!isHeloReceived) {
+                return "503 Bad sequence of commands";
+            }
+            if (sender == null) {
+                return "503 Need MAIL before DATA";
+            }
+            if (recipients.isEmpty()) {
+                return "503 Need RCPT before DATA";
+            }
+            waitingForData = true;
+            return "354 Start mail input; end with <CRLF>.<CRLF>";
+        }
+
+        if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") && 
+            !command.equals("QUIT") && !command.equals("NOOP")) {
+            return "503 Bad sequence of commands";
+        }
+
         switch (command) {
             case "HELO":
             case "EHLO":
