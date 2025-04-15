@@ -58,11 +58,12 @@ public class MySMTPServer extends Thread {
                 }
 
                 System.out.println("Received: " + inputLine);
-                String response = handleCommand(inputLine);
-                socketOut.println(response);
-
+                
                 if (waitingForData) {
                     handleData(inputLine);
+                } else {
+                    String response = handleCommand(inputLine);
+                    socketOut.println(response);
                 }
                 
                 if (isQuit) {
@@ -96,16 +97,13 @@ public class MySMTPServer extends Thread {
         String command = parts[0].toUpperCase();
         String argument = parts.length > 1 ? parts[1].trim() : null;
 
-        // Special handling for VRFY - always allowed
         if (command.equals("VRFY")) {
             if (argument == null || argument.isEmpty()) {
                 return "501 Syntax: VRFY <address>";
             }
-            // First check if the user exists
             if (!Mailbox.isValidUser(argument)) {
                 return "550 User not found";
             }
-            // Then validate the email format
             String vrfyAddress = extractEmailAddress(argument);
             if (vrfyAddress == null) {
                 return "501 Syntax error in parameters or arguments";
@@ -113,27 +111,30 @@ public class MySMTPServer extends Thread {
             return "250 " + vrfyAddress;
         }
 
-        // Check for HELO/EHLO requirement for MAIL command
         if (command.equals("MAIL")) {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
             }
-            if (!inputLine.toUpperCase().startsWith("MAIL FROM:")) {
-                return "501 Syntax: MAIL FROM:<address>";
+            
+            if (!inputLine.matches("^MAIL\\s+FROM:\\s*<.*>$")) {
+                return "500 Syntax error, command unrecognized";
             }
+            
             String mailArg = inputLine.substring("MAIL FROM:".length()).trim();
             if (mailArg.isEmpty()) {
-                return "501 Syntax: MAIL FROM:<address>";
+                return "501 Syntax error in parameters or arguments";
             }
+            
             String fromAddress = extractEmailAddress(mailArg);
             if (fromAddress == null) {
-                return "500 Syntax error in parameters or arguments";
+                return "501 Syntax error in parameters or arguments";
             }
+            
+            recipients.clear();
             sender = fromAddress;
             return "250 OK";
         }
 
-        // Check for RCPT command
         if (command.equals("RCPT")) {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
@@ -141,21 +142,33 @@ public class MySMTPServer extends Thread {
             if (sender == null) {
                 return "503 Need MAIL before RCPT";
             }
-            if (!inputLine.toUpperCase().startsWith("RCPT TO:")) {
-                return "501 Syntax: RCPT TO:<address>";
+            
+            if (!inputLine.matches("^RCPT\\s+TO:\\s*<.*>$")) {
+                return "500 Syntax error, command unrecognized";
             }
-            String toAddress = extractEmailAddress(argument);
-            if (toAddress == null) {
+            
+            String toArg = inputLine.substring("RCPT TO:".length()).trim();
+            if (toArg.isEmpty()) {
                 return "501 Syntax error in parameters or arguments";
             }
+            
+            String toAddress = extractEmailAddress(toArg);
+            if (toAddress == null) {
+                String potentialUser = toArg.replaceAll("^<|>$", "").trim();
+                if (!Mailbox.isValidUser(potentialUser)) {
+                    return "550 No such user here";
+                }
+                return "501 Syntax error in parameters or arguments";
+            }
+            
             if (!Mailbox.isValidUser(toAddress)) {
                 return "550 No such user here";
             }
+            
             recipients.add(toAddress);
             return "250 OK";
         }
 
-        // Check for DATA command
         if (command.equals("DATA")) {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
@@ -164,14 +177,16 @@ public class MySMTPServer extends Thread {
                 return "503 Need MAIL before DATA";
             }
             if (recipients.isEmpty()) {
-                return "550 No valid recipients";
+                recipients.clear();
+                return "503 Need RCPT before DATA";
             }
             waitingForData = true;
+            messageData.setLength(0); 
             return "354 Start mail input; end with <CRLF>.<CRLF>";
         }
 
         if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") && 
-            !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET") && !command.equals("DATA")) {
+            !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET")) {
             return "503 Bad sequence of commands";
         }
 
@@ -195,19 +210,6 @@ public class MySMTPServer extends Thread {
                 resetState();
                 return "250 OK";
 
-            case "DATA":
-                if (!isHeloReceived) {
-                    return "503 Bad sequence of commands";
-                }
-                if (sender == null) {
-                    return "503 Need MAIL before DATA";
-                }
-                if (recipients.isEmpty()) {
-                    return "550 No valid recipients";
-                }
-                waitingForData = true;
-                return "354 Start mail input; end with <CRLF>.<CRLF>";
-
             default:
                 return isUnsupportedCommand(command) ? "502 Command not implemented" : "500 Command not recognized";
         }
@@ -216,9 +218,16 @@ public class MySMTPServer extends Thread {
     private void handleData(String inputLine) {
         if (inputLine.equals(".")) {
             try {
-                // Create mailboxes for recipients and write the message
+                if (recipients.isEmpty()) {
+                    socketOut.println("503 Need RCPT before DATA");
+                    return;
+                }
+                
+                // Create a copy of the current recipients list
+                List<String> currentRecipients = new ArrayList<>(recipients);
+                
                 List<Mailbox> recipientMailboxes = new ArrayList<>();
-                for (String recipient : recipients) {
+                for (String recipient : currentRecipients) {
                     try {
                         recipientMailboxes.add(new Mailbox(recipient));
                     } catch (Mailbox.InvalidUserException e) {
@@ -228,19 +237,20 @@ public class MySMTPServer extends Thread {
                     }
                 }
                 
-                // Write the complete message including headers
                 try (MailWriter writer = new MailWriter(recipientMailboxes)) {
-                    // Write the message headers
-                    writer.write("From: " + sender + "\r\n");
-                    writer.write("To: " + String.join(", ", recipients) + "\r\n");
+                    writer.write("From: <" + sender + ">\r\n");
+                    if (currentRecipients.size() == 1) {
+                        writer.write("To: <" + currentRecipients.get(0) + ">\r\n");
+                    } else {
+                        writer.write("To: <" + String.join(">, <", currentRecipients) + ">\r\n");
+                    }
                     writer.write("Date: " + new java.util.Date() + "\r\n");
-                    writer.write("\r\n"); // Empty line separating headers from body
-                    
-                    // Write the message body
+                    writer.write("\r\n");
                     writer.write(messageData.toString());
+                    writer.flush();
                 }
                 
-                // Reset state after successful message storage
+                recipients.clear();
                 waitingForData = false;
                 messageData.setLength(0);
                 socketOut.println("250 OK");
@@ -249,7 +259,6 @@ public class MySMTPServer extends Thread {
                 socketOut.println("451 Requested action aborted: local error in processing");
             }
         } else {
-            // Handle dot-stuffing (RFC 5321 Section 4.5.2)
             if (inputLine.startsWith("..")) {
                 inputLine = inputLine.substring(1);
             }
@@ -260,15 +269,12 @@ public class MySMTPServer extends Thread {
     private String extractEmailAddress(String argument) {
         if (argument == null) return null;
         
-        // Remove MAIL FROM: or RCPT TO: prefix if present
         argument = argument.replaceAll("^(?i)(MAIL FROM:|RCPT TO:)\\s*", "");
         
-        // Extract email address from <address> format
         if (argument.startsWith("<") && argument.endsWith(">")) {
-            argument = argument.substring(1, argument.length() - 1);
+            argument = argument.substring(1, argument.length() - 1).trim();
         }
         
-        // Validate email format
         if (!EMAIL_PATTERN.matcher(argument).matches()) {
             return null;
         }
