@@ -247,65 +247,59 @@ public class MySMTPServer extends Thread {
         }
     }
 
-    private void handleData(String inputLine) {
+   private void handleData(String inputLine) {
+    try {
         if (inputLine.equals(".")) {
-            try {
-                if (recipients.isEmpty()) {
-                    socketOut.println("503 Need RCPT before DATA");
+            // End of message received
+
+            // Create mailboxes for all recipients
+            List<Mailbox> recipientMailboxes = new ArrayList<>();
+            for (String recipient : recipients) {
+                try {
+                    recipientMailboxes.add(new Mailbox(recipient));
+                } catch (Mailbox.InvalidUserException e) {
+                    System.err.println("Error creating mailbox for recipient " + recipient + ": " + e.getMessage());
+                    socketOut.println("451 Requested action aborted: invalid recipient");
                     return;
                 }
-                
-                // Create a copy of recipients for this message
-                List<String> currentRecipients = new ArrayList<>(recipients);
-                
-                // Create mailboxes for all recipients
-                List<Mailbox> recipientMailboxes = new ArrayList<>();
-                for (String recipient : currentRecipients) {
-                    try {
-                        recipientMailboxes.add(new Mailbox(recipient));
-                    } catch (Mailbox.InvalidUserException e) {
-                        System.err.println("Error creating mailbox for recipient " + recipient + ": " + e.getMessage());
-                        socketOut.println("451 Requested action aborted: invalid recipient");
-                        return;
-                    }
-                }
-                
-                // Write message to all recipient mailboxes
-                try (MailWriter writer = new MailWriter(recipientMailboxes)) {
-                    writer.write("From: <" + sender + ">\r\n");
-                    if (currentRecipients.size() == 1) {
-                        writer.write("To: <" + currentRecipients.get(0) + ">\r\n");
-                    } else {
-                        writer.write("To: <" + String.join(">, <", currentRecipients) + ">\r\n");
-                    }
-                    writer.write("Date: " + new java.util.Date() + "\r\n");
-                    writer.write("\r\n");
-                    writer.write(messageData.toString());
-                    
-                    // Ensure all data is written before proceeding
-                    writer.flush();
-                } catch (IOException e) {
-                    System.err.println("Error writing message to mailboxes: " + e.getMessage());
-                    socketOut.println("451 Requested action aborted: error writing message to mailboxes");
-                    return;
-                }
-                
-                // Clear state after successful message delivery
-                resetState();
-                currentRecipients.clear();
-                recipientMailboxes.clear();
-                socketOut.println("250 OK");
-            } catch (Exception e) {
-                System.err.println("Unexpected error while processing message: " + e.getMessage());
-                socketOut.println("451 Requested action aborted: unexpected error in processing");
             }
+
+            // Write message to all recipient mailboxes
+            try (MailWriter writer = new MailWriter(recipientMailboxes)) {
+                writer.write("From: <" + sender + ">\r\n");
+                if (recipients.size() == 1) {
+                    writer.write("To: <" + recipients.get(0) + ">\r\n");
+                } else {
+                    writer.write("To: <" + String.join(">, <", recipients) + ">\r\n");
+                }
+                writer.write("Date: " + new java.util.Date() + "\r\n");
+                writer.write("\r\n");
+                writer.write(messageData.toString());
+
+                writer.flush(); // Make sure data is written
+            } catch (IOException e) {
+                System.err.println("Error writing message to mailboxes: " + e.getMessage());
+                socketOut.println("451 Requested action aborted: error writing message to mailboxes");
+                return;
+            }
+
+            // Clear state after successful message delivery
+            resetState();
+            socketOut.println("250 OK");
+
         } else {
+            // If the line starts with two dots, reduce it to one (dot-stuffing rule)
             if (inputLine.startsWith("..")) {
                 inputLine = inputLine.substring(1);
             }
             messageData.append(inputLine).append("\r\n");
         }
+
+    } catch (Exception e) {
+        System.err.println("Unexpected error while processing message: " + e.getMessage());
+        socketOut.println("451 Requested action aborted: unexpected error in processing");
     }
+}
 
     private String extractEmailAddress(String argument) {
         if (argument == null) return null;
