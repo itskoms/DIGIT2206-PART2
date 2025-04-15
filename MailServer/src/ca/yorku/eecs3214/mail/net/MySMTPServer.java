@@ -101,11 +101,16 @@ public class MySMTPServer extends Thread {
             if (argument == null || argument.isEmpty()) {
                 return "501 Syntax: VRFY <address>";
             }
+            // First check if the user exists
+            if (!Mailbox.isValidUser(argument)) {
+                return "550 User not found";
+            }
+            // Then validate the email format
             String vrfyAddress = extractEmailAddress(argument);
             if (vrfyAddress == null) {
                 return "501 Syntax error in parameters or arguments";
             }
-            return Mailbox.isValidUser(vrfyAddress) ? "250 " + vrfyAddress : "550 User not found";
+            return "250 " + vrfyAddress;
         }
 
         // Check for HELO/EHLO requirement for MAIL command
@@ -117,9 +122,12 @@ public class MySMTPServer extends Thread {
                 return "501 Syntax: MAIL FROM:<address>";
             }
             String mailArg = inputLine.substring("MAIL FROM:".length()).trim();
+            if (mailArg.isEmpty()) {
+                return "501 Syntax: MAIL FROM:<address>";
+            }
             String fromAddress = extractEmailAddress(mailArg);
             if (fromAddress == null) {
-                return "501 Syntax error in parameters or arguments";
+                return "500 Syntax error in parameters or arguments";
             }
             sender = fromAddress;
             return "250 OK";
@@ -156,14 +164,14 @@ public class MySMTPServer extends Thread {
                 return "503 Need MAIL before DATA";
             }
             if (recipients.isEmpty()) {
-                return "503 Need RCPT before DATA";
+                return "550 No valid recipients";
             }
             waitingForData = true;
             return "354 Start mail input; end with <CRLF>.<CRLF>";
         }
 
         if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") && 
-            !command.equals("QUIT") && !command.equals("NOOP")) {
+            !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET") && !command.equals("DATA")) {
             return "503 Bad sequence of commands";
         }
 
@@ -186,6 +194,19 @@ public class MySMTPServer extends Thread {
             case "RSET":
                 resetState();
                 return "250 OK";
+
+            case "DATA":
+                if (!isHeloReceived) {
+                    return "503 Bad sequence of commands";
+                }
+                if (sender == null) {
+                    return "503 Need MAIL before DATA";
+                }
+                if (recipients.isEmpty()) {
+                    return "550 No valid recipients";
+                }
+                waitingForData = true;
+                return "354 Start mail input; end with <CRLF>.<CRLF>";
 
             default:
                 return isUnsupportedCommand(command) ? "502 Command not implemented" : "500 Command not recognized";
