@@ -1,3 +1,23 @@
+// We are having trouble with the DATA and RSET commands, the tests are
+// not helping because they are expecting the wrong email to return when the output shows that the email address returned is correct. 
+// It was inputed for this command and the command is returning the inputed email address. 
+
+// For example, this is the error message: 
+
+// org.opentest4j.AssertionFailedError: Message content in saved message file does not match message sent in connection, 
+// or writer was not flushed/closed before the successful response. ==> expected: <To: <john.doe@example.com>> but was: <To: <another_valid_user@example.com>>
+
+// However, the output shows that the email address is correct.
+
+// Command: EHLO somehostname
+// Command: MAIL FROM:<sender@example.com>
+// Command: RCPT TO:<valid_user1@example.com>
+// Command: RSET
+// Command: MAIL FROM:<sender@example.com>
+// Command: RCPT TO:<another_valid_user@example.com>
+// Command: DATA
+// Command: .
+
 package ca.yorku.eecs3214.mail.net;
 
 import ca.yorku.eecs3214.mail.mailbox.MailWriter;
@@ -49,6 +69,7 @@ public class MySMTPServer extends Thread {
     @Override
     public void run() {
         try (this.socket) {
+            // Send SMTP welcome message
             socketOut.println("220 " + getHostName() + " SMTP server ready");
 
             String inputLine;
@@ -60,12 +81,15 @@ public class MySMTPServer extends Thread {
                 System.out.println("Received: " + inputLine);
                 
                 if (waitingForData) {
+                    // Process message content during DATA command
                     handleData(inputLine);
                 } else {
+                    // Process SMTP commands
                     String response = handleCommand(inputLine);
                     socketOut.println(response);
                 }
                 
+                // Check if QUIT command was processed
                 if (isQuit) {
                     socket.close();
                     return;
@@ -97,6 +121,7 @@ public class MySMTPServer extends Thread {
         String command = parts[0].toUpperCase();
         String argument = parts.length > 1 ? parts[1].trim() : null;
 
+        // Process VRFY command
         if (command.equals("VRFY")) {
             if (argument == null || argument.isEmpty()) {
                 return "501 Syntax: VRFY <address>";
@@ -111,6 +136,7 @@ public class MySMTPServer extends Thread {
             return "250 " + vrfyAddress;
         }
 
+        // Process MAIL command
         if (command.equals("MAIL")) {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
@@ -135,6 +161,7 @@ public class MySMTPServer extends Thread {
             return "250 OK";
         }
 
+        // Process RCPT command
         if (command.equals("RCPT")) {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
@@ -169,6 +196,7 @@ public class MySMTPServer extends Thread {
             return "250 OK";
         }
 
+        // Process DATA command
         if (command.equals("DATA")) {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
@@ -177,7 +205,6 @@ public class MySMTPServer extends Thread {
                 return "503 Need MAIL before DATA";
             }
             if (recipients.isEmpty()) {
-                recipients.clear();
                 return "503 Need RCPT before DATA";
             }
             waitingForData = true;
@@ -185,11 +212,13 @@ public class MySMTPServer extends Thread {
             return "354 Start mail input; end with <CRLF>.<CRLF>";
         }
 
+        // Check command sequence
         if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") && 
             !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET")) {
             return "503 Bad sequence of commands";
         }
 
+        // Process remaining commands
         switch (command) {
             case "HELO":
             case "EHLO":
@@ -207,7 +236,10 @@ public class MySMTPServer extends Thread {
                 return "221 " + getHostName() + " closing connection";
 
             case "RSET":
+                // Reset all state variables to initial values
                 resetState();
+                // Keep HELO state as per RFC 5321
+                isHeloReceived = true;
                 return "250 OK";
 
             default:
@@ -223,9 +255,10 @@ public class MySMTPServer extends Thread {
                     return;
                 }
                 
-                // Create a copy of the current recipients list
+                // Create a copy of recipients for this message
                 List<String> currentRecipients = new ArrayList<>(recipients);
                 
+                // Create mailboxes for all recipients
                 List<Mailbox> recipientMailboxes = new ArrayList<>();
                 for (String recipient : currentRecipients) {
                     try {
@@ -237,6 +270,7 @@ public class MySMTPServer extends Thread {
                     }
                 }
                 
+                // Write message to all recipient mailboxes
                 try (MailWriter writer = new MailWriter(recipientMailboxes)) {
                     writer.write("From: <" + sender + ">\r\n");
                     if (currentRecipients.size() == 1) {
@@ -247,16 +281,23 @@ public class MySMTPServer extends Thread {
                     writer.write("Date: " + new java.util.Date() + "\r\n");
                     writer.write("\r\n");
                     writer.write(messageData.toString());
+                    
+                    // Ensure all data is written before proceeding
                     writer.flush();
+                } catch (IOException e) {
+                    System.err.println("Error writing message to mailboxes: " + e.getMessage());
+                    socketOut.println("451 Requested action aborted: error writing message to mailboxes");
+                    return;
                 }
                 
-                recipients.clear();
-                waitingForData = false;
-                messageData.setLength(0);
+                // Clear state after successful message delivery
+                resetState();
+                currentRecipients.clear();
+                recipientMailboxes.clear();
                 socketOut.println("250 OK");
             } catch (Exception e) {
-                System.err.println("Error saving message: " + e.getMessage());
-                socketOut.println("451 Requested action aborted: local error in processing");
+                System.err.println("Unexpected error while processing message: " + e.getMessage());
+                socketOut.println("451 Requested action aborted: unexpected error in processing");
             }
         } else {
             if (inputLine.startsWith("..")) {
@@ -284,7 +325,7 @@ public class MySMTPServer extends Thread {
 
     private void resetState() {
         sender = null;
-        recipients.clear();
+        recipients.clear();  
         messageData.setLength(0);
         waitingForData = false;
     }
