@@ -79,7 +79,7 @@ public class MySMTPServer extends Thread {
                 }
 
                 System.out.println("Received: " + inputLine);
-                
+
                 if (waitingForData) {
                     // Process message content during DATA command
                     handleData(inputLine);
@@ -88,7 +88,7 @@ public class MySMTPServer extends Thread {
                     String response = handleCommand(inputLine);
                     socketOut.println(response);
                 }
-                
+
                 // Check if QUIT command was processed
                 if (isQuit) {
                     socket.close();
@@ -105,9 +105,9 @@ public class MySMTPServer extends Thread {
     private boolean isUnsupportedCommand(String command) {
         // List of known SMTP commands that we don't support
         String[] unsupportedCommands = {
-            "EXPN", "HELP", "AUTH", "STARTTLS", "TURN", "SOML", "SEND", "SAML"
+                "EXPN", "HELP", "AUTH", "STARTTLS", "TURN", "SOML", "SEND", "SAML"
         };
-        
+
         for (String unsupported : unsupportedCommands) {
             if (command.equalsIgnoreCase(unsupported)) {
                 return true;
@@ -141,21 +141,21 @@ public class MySMTPServer extends Thread {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
             }
-            
+
             if (!inputLine.matches("^MAIL\\s+FROM:\\s*<.*>$")) {
                 return "500 Syntax error, command unrecognized";
             }
-            
+
             String mailArg = inputLine.substring("MAIL FROM:".length()).trim();
             if (mailArg.isEmpty()) {
                 return "501 Syntax error in parameters or arguments";
             }
-            
+
             String fromAddress = extractEmailAddress(mailArg);
             if (fromAddress == null) {
                 return "501 Syntax error in parameters or arguments";
             }
-            
+
             recipients.clear();
             sender = fromAddress;
             return "250 OK";
@@ -169,16 +169,16 @@ public class MySMTPServer extends Thread {
             if (sender == null) {
                 return "503 Need MAIL before RCPT";
             }
-            
+
             if (!inputLine.matches("^RCPT\\s+TO:\\s*<.*>$")) {
                 return "500 Syntax error, command unrecognized";
             }
-            
+
             String toArg = inputLine.substring("RCPT TO:".length()).trim();
             if (toArg.isEmpty()) {
                 return "501 Syntax error in parameters or arguments";
             }
-            
+
             String toAddress = extractEmailAddress(toArg);
             if (toAddress == null) {
                 String potentialUser = toArg.replaceAll("^<|>$", "").trim();
@@ -187,11 +187,11 @@ public class MySMTPServer extends Thread {
                 }
                 return "501 Syntax error in parameters or arguments";
             }
-            
+
             if (!Mailbox.isValidUser(toAddress)) {
                 return "550 No such user here";
             }
-            
+
             recipients.add(toAddress);
             return "250 OK";
         }
@@ -208,13 +208,13 @@ public class MySMTPServer extends Thread {
                 return "503 Need RCPT before DATA";
             }
             waitingForData = true;
-            messageData.setLength(0); 
+            messageData.setLength(0);
             return "354 Start mail input; end with <CRLF>.<CRLF>";
         }
 
         // Check command sequence
-        if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") && 
-            !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET")) {
+        if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") &&
+                !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET")) {
             return "503 Bad sequence of commands";
         }
 
@@ -247,12 +247,24 @@ public class MySMTPServer extends Thread {
         }
     }
 
+<<<<<<< Updated upstream
    private void handleData(String inputLine) {
     try {
         if (inputLine.equals(".")) {
             // End of message received
 
             // Create mailboxes for all recipients
+=======
+    private void handleData(String inputLine) {
+        if (".".equals(inputLine)) {
+            // End of message reached, process the accumulated data
+            if (messageData.length() == 0) {
+                resetState();
+                return;
+            }
+
+            // Build mailboxes for valid recipients
+>>>>>>> Stashed changes
             List<Mailbox> recipientMailboxes = new ArrayList<>();
             for (String recipient : recipients) {
                 try {
@@ -286,6 +298,7 @@ public class MySMTPServer extends Thread {
             // Clear state after successful message delivery
             resetState();
             socketOut.println("250 OK");
+<<<<<<< Updated upstream
 
         } else {
             // If the line starts with two dots, reduce it to one (dot-stuffing rule)
@@ -298,28 +311,47 @@ public class MySMTPServer extends Thread {
     } catch (Exception e) {
         System.err.println("Unexpected error while processing message: " + e.getMessage());
         socketOut.println("451 Requested action aborted: unexpected error in processing");
+=======
+            resetState();
+            return;
+        }
+
+        // Dot-stuffing: reduce ".." to "."
+        if (inputLine.startsWith("..")) {
+            inputLine = inputLine.substring(1);
+        }
+
+        // Append the line to the message data
+        messageData.append(inputLine).append("\r\n"); // SMTP requires CRLF
+>>>>>>> Stashed changes
     }
 }
 
     private String extractEmailAddress(String argument) {
         if (argument == null) return null;
-        
+
         argument = argument.replaceAll("^(?i)(MAIL FROM:|RCPT TO:)\\s*", "");
-        
+
         if (argument.startsWith("<") && argument.endsWith(">")) {
             argument = argument.substring(1, argument.length() - 1).trim();
         }
-        
+
         if (!EMAIL_PATTERN.matcher(argument).matches()) {
             return null;
         }
-        
+
         return argument;
     }
 
     private void resetState() {
         sender = null;
+<<<<<<< Updated upstream
         recipients.clear();  
+=======
+        recipients.clear();
+        messageData = new StringBuilder();
+        waitingForData = false;
+>>>>>>> Stashed changes
         messageData.setLength(0);
         waitingForData = false;
     }
