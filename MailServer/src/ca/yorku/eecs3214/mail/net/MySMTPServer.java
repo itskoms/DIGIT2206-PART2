@@ -79,7 +79,7 @@ public class MySMTPServer extends Thread {
                 }
 
                 System.out.println("Received: " + inputLine);
-                
+
                 if (waitingForData) {
                     // Process message content during DATA command
                     handleData(inputLine);
@@ -88,7 +88,7 @@ public class MySMTPServer extends Thread {
                     String response = handleCommand(inputLine);
                     socketOut.println(response);
                 }
-                
+
                 // Check if QUIT command was processed
                 if (isQuit) {
                     socket.close();
@@ -105,9 +105,9 @@ public class MySMTPServer extends Thread {
     private boolean isUnsupportedCommand(String command) {
         // List of known SMTP commands that we don't support
         String[] unsupportedCommands = {
-            "EXPN", "HELP", "AUTH", "STARTTLS", "TURN", "SOML", "SEND", "SAML"
+                "EXPN", "HELP", "AUTH", "STARTTLS", "TURN", "SOML", "SEND", "SAML"
         };
-        
+
         for (String unsupported : unsupportedCommands) {
             if (command.equalsIgnoreCase(unsupported)) {
                 return true;
@@ -141,21 +141,21 @@ public class MySMTPServer extends Thread {
             if (!isHeloReceived) {
                 return "503 Bad sequence of commands";
             }
-            
+
             if (!inputLine.matches("^MAIL\\s+FROM:\\s*<.*>$")) {
                 return "500 Syntax error, command unrecognized";
             }
-            
+
             String mailArg = inputLine.substring("MAIL FROM:".length()).trim();
             if (mailArg.isEmpty()) {
                 return "501 Syntax error in parameters or arguments";
             }
-            
+
             String fromAddress = extractEmailAddress(mailArg);
             if (fromAddress == null) {
                 return "501 Syntax error in parameters or arguments";
             }
-            
+
             recipients.clear();
             sender = fromAddress;
             return "250 OK";
@@ -169,16 +169,16 @@ public class MySMTPServer extends Thread {
             if (sender == null) {
                 return "503 Need MAIL before RCPT";
             }
-            
+
             if (!inputLine.matches("^RCPT\\s+TO:\\s*<.*>$")) {
                 return "500 Syntax error, command unrecognized";
             }
-            
+
             String toArg = inputLine.substring("RCPT TO:".length()).trim();
             if (toArg.isEmpty()) {
                 return "501 Syntax error in parameters or arguments";
             }
-            
+
             String toAddress = extractEmailAddress(toArg);
             if (toAddress == null) {
                 String potentialUser = toArg.replaceAll("^<|>$", "").trim();
@@ -187,11 +187,11 @@ public class MySMTPServer extends Thread {
                 }
                 return "501 Syntax error in parameters or arguments";
             }
-            
+
             if (!Mailbox.isValidUser(toAddress)) {
                 return "550 No such user here";
             }
-            
+
             recipients.add(toAddress);
             return "250 OK";
         }
@@ -208,13 +208,13 @@ public class MySMTPServer extends Thread {
                 return "503 Need RCPT before DATA";
             }
             waitingForData = true;
-            messageData.setLength(0); 
+            messageData.setLength(0);
             return "354 Start mail input; end with <CRLF>.<CRLF>";
         }
 
         // Check command sequence
-        if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") && 
-            !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET")) {
+        if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") &&
+                !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET")) {
             return "503 Bad sequence of commands";
         }
 
@@ -247,60 +247,54 @@ public class MySMTPServer extends Thread {
         }
     }
 
-    private void handleData(BufferedReader socketIn) {
+    private void handleData(String inputLine) {
         try {
-            // Read message content lines until "." is received
-            String inputLine;
-            StringBuilder messageData = new StringBuilder();
-
-            while ((inputLine = socketIn.readLine()) != null) {
-                if (".".equals(inputLine)) {
-                    break; // End of message
+            // Check for end-of-data indicator
+            if (".".equals(inputLine)) {
+                if (messageData.isEmpty()) {
+                    resetState();
+                    return;
                 }
 
-                // Dot-stuffing: reduce ".." to "."
+                // Attempt to create mailboxes for all valid recipients
+                List<Mailbox> recipientMailboxes = new ArrayList<>();
+                for (String recipient : recipients) {
+                    try {
+                        recipientMailboxes.add(new Mailbox(recipient));
+                    } catch (Mailbox.InvalidUserException e) {
+                        System.err.println("Invalid recipient: " + recipient + " -> " + e.getMessage());
+                        socketOut.println("451 Requested action aborted: invalid recipient");
+                        resetState(); // reset state even on error
+                        return;
+                    }
+                }
+
+                // Attempt to write message to mailboxes
+                try (MailWriter writer = new MailWriter(recipientMailboxes)) {
+                    writer.write(messageData.toString());
+                    writer.flush();
+                } catch (IOException e) {
+                    System.err.println("Failed to write to mailboxes: " + e.getMessage());
+                    socketOut.println("451 Requested action aborted: error writing to mailboxes");
+                    resetState(); // reset state even on error
+                    return;
+                }
+
+                // Successfully delivered
+                socketOut.println("250 OK");
+                resetState();
+            } else {
+                // Dot-stuffing: if line starts with two dots, reduce to one
                 if (inputLine.startsWith("..")) {
                     inputLine = inputLine.substring(1);
                 }
 
-                messageData.append(inputLine).append("\r\n"); // SMTP requires CRLF
+                // Accumulate the input line into message data buffer
+                messageData.append(inputLine).append("\r\n");
             }
 
-            if (messageData.isEmpty()) {
-                resetState();
-                return;
-            }
-
-            // Build mailboxes for valid recipients
-            List<Mailbox> recipientMailboxes = new ArrayList<>();
-            for (String recipient : recipients) {
-                try {
-                    recipientMailboxes.add(new Mailbox(recipient));
-                } catch (Mailbox.InvalidUserException e) {
-                    System.err.println("Invalid recipient: " + recipient + " -> " + e.getMessage());
-                    socketOut.println("451 Requested action aborted: invalid recipient");
-                    resetState();
-                    return;
-                }
-            }
-
-            // Use MailWriter to write message to all recipients
-            try (MailWriter writer = new MailWriter(recipientMailboxes)) {
-                writer.write(messageData.toString());
-                writer.flush(); // ensure buffer is written before closing
-            } catch (IOException e) {
-                System.err.println("Failed to write to mailboxes: " + e.getMessage());
-                socketOut.println("451 Requested action aborted: error writing to mailboxes");
-                resetState();
-                return;
-            }
-
-            // Successful delivery
-            socketOut.println("250 OK");
-            resetState();
-
-        } catch (IOException e) {
-            System.err.println("Unexpected I/O error during handleData: " + e.getMessage());
+        } catch (Exception e) {
+            System.err.println("Unexpected error in handleData: " + e.getMessage());
             socketOut.println("451 Requested action aborted: internal error");
             resetState();
         }
@@ -308,23 +302,23 @@ public class MySMTPServer extends Thread {
 
     private String extractEmailAddress(String argument) {
         if (argument == null) return null;
-        
+
         argument = argument.replaceAll("^(?i)(MAIL FROM:|RCPT TO:)\\s*", "");
-        
+
         if (argument.startsWith("<") && argument.endsWith(">")) {
             argument = argument.substring(1, argument.length() - 1).trim();
         }
-        
+
         if (!EMAIL_PATTERN.matcher(argument).matches()) {
             return null;
         }
-        
+
         return argument;
     }
 
     private void resetState() {
         sender = null;
-        recipients.clear();  
+        recipients.clear();
         messageData = new StringBuilder();
         waitingForData = false;
         messageData.setLength(0);
