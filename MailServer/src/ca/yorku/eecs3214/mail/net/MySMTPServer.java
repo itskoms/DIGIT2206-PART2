@@ -41,7 +41,7 @@ public class MySMTPServer extends Thread {
     private String sender = null;
     private final List<String> recipients = new ArrayList<>();
     private boolean waitingForData = false;
-    private final StringBuilder messageData = new StringBuilder();
+    private StringBuilder messageData = new StringBuilder();
     private boolean isQuit = false;
     private boolean isHeloReceived = false;
 
@@ -247,59 +247,64 @@ public class MySMTPServer extends Thread {
         }
     }
 
-   private void handleData(String inputLine) {
-    try {
-        if (inputLine.equals(".")) {
-            // End of message received
+    private void handleData(BufferedReader socketIn) {
+        try {
+            // Read message content lines until "." is received
+            String inputLine;
+            StringBuilder messageData = new StringBuilder();
 
-            // Create mailboxes for all recipients
+            while ((inputLine = socketIn.readLine()) != null) {
+                if (".".equals(inputLine)) {
+                    break; // End of message
+                }
+
+                // Dot-stuffing: reduce ".." to "."
+                if (inputLine.startsWith("..")) {
+                    inputLine = inputLine.substring(1);
+                }
+
+                messageData.append(inputLine).append("\r\n"); // SMTP requires CRLF
+            }
+
+            if (messageData.isEmpty()) {
+                resetState();
+                return;
+            }
+
+            // Build mailboxes for valid recipients
             List<Mailbox> recipientMailboxes = new ArrayList<>();
             for (String recipient : recipients) {
                 try {
                     recipientMailboxes.add(new Mailbox(recipient));
                 } catch (Mailbox.InvalidUserException e) {
-                    System.err.println("Error creating mailbox for recipient " + recipient + ": " + e.getMessage());
+                    System.err.println("Invalid recipient: " + recipient + " -> " + e.getMessage());
                     socketOut.println("451 Requested action aborted: invalid recipient");
+                    resetState();
                     return;
                 }
             }
 
-            // Write message to all recipient mailboxes
+            // Use MailWriter to write message to all recipients
             try (MailWriter writer = new MailWriter(recipientMailboxes)) {
-                writer.write("From: <" + sender + ">\r\n");
-                if (recipients.size() == 1) {
-                    writer.write("To: <" + recipients.get(0) + ">\r\n");
-                } else {
-                    writer.write("To: <" + String.join(">, <", recipients) + ">\r\n");
-                }
-                writer.write("Date: " + new java.util.Date() + "\r\n");
-                writer.write("\r\n");
                 writer.write(messageData.toString());
-
-                writer.flush(); // Make sure data is written
+                writer.flush(); // ensure buffer is written before closing
             } catch (IOException e) {
-                System.err.println("Error writing message to mailboxes: " + e.getMessage());
-                socketOut.println("451 Requested action aborted: error writing message to mailboxes");
+                System.err.println("Failed to write to mailboxes: " + e.getMessage());
+                socketOut.println("451 Requested action aborted: error writing to mailboxes");
+                resetState();
                 return;
             }
 
-            // Clear state after successful message delivery
-            resetState();
+            // Successful delivery
             socketOut.println("250 OK");
+            resetState();
 
-        } else {
-            // If the line starts with two dots, reduce it to one (dot-stuffing rule)
-            if (inputLine.startsWith("..")) {
-                inputLine = inputLine.substring(1);
-            }
-            messageData.append(inputLine).append("\r\n");
+        } catch (IOException e) {
+            System.err.println("Unexpected I/O error during handleData: " + e.getMessage());
+            socketOut.println("451 Requested action aborted: internal error");
+            resetState();
         }
-
-    } catch (Exception e) {
-        System.err.println("Unexpected error while processing message: " + e.getMessage());
-        socketOut.println("451 Requested action aborted: unexpected error in processing");
     }
-}
 
     private String extractEmailAddress(String argument) {
         if (argument == null) return null;
@@ -320,8 +325,9 @@ public class MySMTPServer extends Thread {
     private void resetState() {
         sender = null;
         recipients.clear();  
-        messageData.setLength(0);
+        messageData = new StringBuilder();
         waitingForData = false;
+        messageData.setLength(0);
     }
 
     /**
