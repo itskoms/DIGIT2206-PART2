@@ -247,26 +247,10 @@ public class MySMTPServer extends Thread {
         }
     }
 
-    private void handleData(BufferedReader socketIn) {
-        try {
-            // Read message content lines until "." is received
-            String inputLine;
-            StringBuilder messageData = new StringBuilder();
-
-            while ((inputLine = socketIn.readLine()) != null) {
-                if (".".equals(inputLine)) {
-                    break; // End of message
-                }
-
-                // Dot-stuffing: reduce ".." to "."
-                if (inputLine.startsWith("..")) {
-                    inputLine = inputLine.substring(1);
-                }
-
-                messageData.append(inputLine).append("\r\n"); // SMTP requires CRLF
-            }
-
-            if (messageData.isEmpty()) {
+    private void handleData(String inputLine) {
+        if (".".equals(inputLine)) {
+            // End of message reached, process the accumulated data
+            if (messageData.length() == 0) {
                 resetState();
                 return;
             }
@@ -298,12 +282,16 @@ public class MySMTPServer extends Thread {
             // Successful delivery
             socketOut.println("250 OK");
             resetState();
-
-        } catch (IOException e) {
-            System.err.println("Unexpected I/O error during handleData: " + e.getMessage());
-            socketOut.println("451 Requested action aborted: internal error");
-            resetState();
+            return;
         }
+
+        // Dot-stuffing: reduce ".." to "."
+        if (inputLine.startsWith("..")) {
+            inputLine = inputLine.substring(1);
+        }
+
+        // Append the line to the message data
+        messageData.append(inputLine).append("\r\n"); // SMTP requires CRLF
     }
 
     private String extractEmailAddress(String argument) {
