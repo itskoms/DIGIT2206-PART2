@@ -1,338 +1,148 @@
-// We are having trouble with the DATA and RSET commands, the tests are
-// not helping because they are expecting the wrong email to return when the output shows that the email address returned is correct. 
-// It was inputed for this command and the command is returning the inputed email address. 
-
-// For example, this is the error message: 
-
-// org.opentest4j.AssertionFailedError: Message content in saved message file does not match message sent in connection, 
-// or writer was not flushed/closed before the successful response. ==> expected: <To: <john.doe@example.com>> but was: <To: <another_valid_user@example.com>>
-
-// However, the output shows that the email address is correct.
-
-// Command: EHLO somehostname
-// Command: MAIL FROM:<sender@example.com>
-// Command: RCPT TO:<valid_user1@example.com>
-// Command: RSET
-// Command: MAIL FROM:<sender@example.com>
-// Command: RCPT TO:<another_valid_user@example.com>
-// Command: DATA
-// Command: .
-
 package ca.yorku.eecs3214.mail.net;
 
 import ca.yorku.eecs3214.mail.mailbox.MailWriter;
 import ca.yorku.eecs3214.mail.mailbox.Mailbox;
 
 import java.io.*;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.net.UnknownHostException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.regex.Pattern;
+import java.net.*;
+import java.util.*;
 
 public class MySMTPServer extends Thread {
 
-    private final Socket socket;
-    private final BufferedReader socketIn;
-    private final PrintWriter socketOut;
+    private final Socket clientSocket;
+    private final BufferedReader in;
+    private final PrintWriter out;
 
-    private String sender = null;
-    private final List<String> recipients = new ArrayList<>();
-    private boolean waitingForData = false;
-    private StringBuilder messageData = new StringBuilder();
-    private boolean isQuit = false;
-    private boolean isHeloReceived = false;
-
-    // Email address pattern for validation
-    private static final Pattern EMAIL_PATTERN = Pattern.compile("^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$");
-
-    /**
-     * Initializes an object responsible for a connection to an individual client.
-     *
-     * @param socket The socket associated to the accepted connection.
-     * @throws IOException If there is an error attempting to retrieve the socket's information.
-     */
-    public MySMTPServer(Socket socket) throws IOException {
-        this.socket = socket;
-        this.socketIn = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-        this.socketOut = new PrintWriter(new OutputStreamWriter(socket.getOutputStream()), true);
+    public MySMTPServer(Socket clientSocket) throws IOException {
+        this.clientSocket = clientSocket;
+        this.in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+        this.out = new PrintWriter(new OutputStreamWriter(clientSocket.getOutputStream()), true);
     }
 
-    /**
-     * Handles the communication with an individual client. Must send the initial welcome message, and then repeatedly
-     * read requests, process the individual operation, and return a response, according to the SMTP protocol. Empty
-     * request lines should be ignored. Only returns if the connection is terminated or if the QUIT command is issued.
-     * Must close the socket connection before returning.
-     */
     @Override
     public void run() {
-        try (this.socket) {
-            // Send SMTP welcome message
-            socketOut.println("220 " + getHostName() + " SMTP server ready");
+        try (clientSocket) {
+            out.println("220 " + getServerName() + " Simple Mail Transfer Service Ready");
+
+            String fromAddress = null;
+            List<Mailbox> recipientList = new ArrayList<>();
+            boolean inDataMode = false;
+            boolean greeted = false;
 
             String inputLine;
-            while ((inputLine = socketIn.readLine()) != null && !isQuit) {
-                if (inputLine.trim().isEmpty()) {
+
+            while ((inputLine = in.readLine()) != null) {
+                inputLine = inputLine.trim();
+                if (inputLine.isEmpty()) continue;
+
+                String command = inputLine.toUpperCase();
+
+                if (inDataMode) {
+                    StringBuilder messageBody = new StringBuilder();
+                    messageBody.append(inputLine).append("\r\n");
+
+                    while ((inputLine = in.readLine()) != null && !inputLine.equals(".")) {
+                        messageBody.append(inputLine).append("\r\n");
+                    }
+
+                    try (MailWriter writer = new MailWriter(recipientList)) {
+                        writer.write(messageBody.toString());
+                    } catch (IOException e) {
+                        out.println("451 Local error encountered while processing");
+                        continue;
+                    }
+
+                    out.println("250 Message received");
+                    fromAddress = null;
+                    recipientList.clear();
+                    inDataMode = false;
                     continue;
                 }
 
-                System.out.println("Received: " + inputLine);
-
-                if (waitingForData) {
-                    // Process message content during DATA command
-                    handleData(inputLine);
-                } else {
-                    // Process SMTP commands
-                    String response = handleCommand(inputLine);
-                    socketOut.println(response);
-                }
-
-                // Check if QUIT command was processed
-                if (isQuit) {
-                    socket.close();
-                    return;
-                }
-            }
-
-        } catch (IOException e) {
-            System.err.println("Error in client's connection handling.");
-            e.printStackTrace();
-        }
-    }
-
-    private boolean isUnsupportedCommand(String command) {
-        // List of known SMTP commands that we don't support
-        String[] unsupportedCommands = {
-                "EXPN", "HELP", "AUTH", "STARTTLS", "TURN", "SOML", "SEND", "SAML"
-        };
-
-        for (String unsupported : unsupportedCommands) {
-            if (command.equalsIgnoreCase(unsupported)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private String handleCommand(String inputLine) {
-        String[] parts = inputLine.trim().split("\\s+", 2);
-        String command = parts[0].toUpperCase();
-        String argument = parts.length > 1 ? parts[1].trim() : null;
-
-        // Process VRFY command
-        if (command.equals("VRFY")) {
-            if (argument == null || argument.isEmpty()) {
-                return "501 Syntax: VRFY <address>";
-            }
-            if (!Mailbox.isValidUser(argument)) {
-                return "550 User not found";
-            }
-            String vrfyAddress = extractEmailAddress(argument);
-            if (vrfyAddress == null) {
-                return "501 Syntax error in parameters or arguments";
-            }
-            return "250 " + vrfyAddress;
-        }
-
-        // Process MAIL command
-        if (command.equals("MAIL")) {
-            if (!isHeloReceived) {
-                return "503 Bad sequence of commands";
-            }
-
-            if (!inputLine.matches("^MAIL\\s+FROM:\\s*<.*>$")) {
-                return "500 Syntax error, command unrecognized";
-            }
-
-            String mailArg = inputLine.substring("MAIL FROM:".length()).trim();
-            if (mailArg.isEmpty()) {
-                return "501 Syntax error in parameters or arguments";
-            }
-
-            String fromAddress = extractEmailAddress(mailArg);
-            if (fromAddress == null) {
-                return "501 Syntax error in parameters or arguments";
-            }
-
-            recipients.clear();
-            sender = fromAddress;
-            return "250 OK";
-        }
-
-        // Process RCPT command
-        if (command.equals("RCPT")) {
-            if (!isHeloReceived) {
-                return "503 Bad sequence of commands";
-            }
-            if (sender == null) {
-                return "503 Need MAIL before RCPT";
-            }
-
-            if (!inputLine.matches("^RCPT\\s+TO:\\s*<.*>$")) {
-                return "500 Syntax error, command unrecognized";
-            }
-
-            String toArg = inputLine.substring("RCPT TO:".length()).trim();
-            if (toArg.isEmpty()) {
-                return "501 Syntax error in parameters or arguments";
-            }
-
-            String toAddress = extractEmailAddress(toArg);
-            if (toAddress == null) {
-                String potentialUser = toArg.replaceAll("^<|>$", "").trim();
-                if (!Mailbox.isValidUser(potentialUser)) {
-                    return "550 No such user here";
-                }
-                return "501 Syntax error in parameters or arguments";
-            }
-
-            if (!Mailbox.isValidUser(toAddress)) {
-                return "550 No such user here";
-            }
-
-            recipients.add(toAddress);
-            return "250 OK";
-        }
-
-        // Process DATA command
-        if (command.equals("DATA")) {
-            if (!isHeloReceived) {
-                return "503 Bad sequence of commands";
-            }
-            if (sender == null) {
-                return "503 Need MAIL before DATA";
-            }
-            if (recipients.isEmpty()) {
-                return "503 Need RCPT before DATA";
-            }
-            waitingForData = true;
-            messageData.setLength(0);
-            return "354 Start mail input; end with <CRLF>.<CRLF>";
-        }
-
-        // Check command sequence
-        if (!isHeloReceived && !command.equals("HELO") && !command.equals("EHLO") &&
-                !command.equals("QUIT") && !command.equals("NOOP") && !command.equals("RSET")) {
-            return "503 Bad sequence of commands";
-        }
-
-        // Process remaining commands
-        switch (command) {
-            case "HELO":
-            case "EHLO":
-                if (argument == null || argument.isEmpty()) {
-                    return "501 Syntax: HELO/EHLO hostname";
-                }
-                isHeloReceived = true;
-                return "250 " + getHostName() + " Hello " + argument;
-
-            case "NOOP":
-                return "250 OK";
-
-            case "QUIT":
-                isQuit = true;
-                return "221 " + getHostName() + " closing connection";
-
-            case "RSET":
-                // Reset all state variables to initial values
-                resetState();
-                // Keep HELO state as per RFC 5321
-                isHeloReceived = true;
-                return "250 OK";
-
-            default:
-                return isUnsupportedCommand(command) ? "502 Command not implemented" : "500 Command not recognized";
-        }
-    }
-
-    private void handleData(String inputLine) {
-        try {
-            // Check for end-of-data indicator
-            if (".".equals(inputLine)) {
-                if (messageData.isEmpty()) {
-                    resetState();
-                    return;
-                }
-
-                // Attempt to create mailboxes for all valid recipients
-                List<Mailbox> recipientMailboxes = new ArrayList<>();
-                for (String recipient : recipients) {
-                    try {
-                        recipientMailboxes.add(new Mailbox(recipient));
-                    } catch (Mailbox.InvalidUserException e) {
-                        System.err.println("Invalid recipient: " + recipient + " -> " + e.getMessage());
-                        socketOut.println("451 Requested action aborted: invalid recipient");
-                        resetState(); // reset state even on error
-                        return;
+                if (command.startsWith("HELO ")) {
+                    greeted = true;
+                    out.println("250 " + getServerName());
+                } else if (command.startsWith("EHLO ")) {
+                    greeted = true;
+                    out.println("250-" + getServerName());
+                    out.println("250 HELP");
+                } else if (command.startsWith("MAIL FROM:")) {
+                    if (!greeted) {
+                        out.println("503 Please greet the server first");
+                        continue;
                     }
+                    if (!inputLine.matches("(?i)^MAIL FROM:\\s*<[^<>@]+@[^<>@]+>$")) {
+                        out.println("501 Malformed address format");
+                        continue;
+                    }
+                    fromAddress = extractAddress(inputLine);
+                    recipientList.clear();
+                    out.println("250 Sender OK");
+                } else if (command.startsWith("RCPT TO:")) {
+                    if (fromAddress == null) {
+                        out.println("503 Sender not specified");
+                        continue;
+                    }
+                    if (!inputLine.matches("(?i)^RCPT TO:\\s*<[^<>@]+@[^<>@]+>$")) {
+                        out.println("501 Invalid recipient address");
+                        continue;
+                    }
+                    String recipient = extractAddress(inputLine);
+                    if (!Mailbox.isValidUser(recipient)) {
+                        out.println("550 Unknown recipient");
+                        continue;
+                    }
+                    try {
+                        recipientList.add(new Mailbox(recipient));
+                        out.println("250 Recipient accepted");
+                    } catch (Mailbox.InvalidUserException e) {
+                        out.println("550 Unknown recipient");
+                    }
+                } else if (command.equals("DATA")) {
+                    if (fromAddress == null || recipientList.isEmpty()) {
+                        out.println("503 Incomplete transaction, MAIL FROM and RCPT TO required");
+                        continue;
+                    }
+                    out.println("354 Ready to receive email content; end with <CRLF>.<CRLF>");
+                    inDataMode = true;
+                } else if (command.equals("RSET")) {
+                    fromAddress = null;
+                    recipientList.clear();
+                    inDataMode = false;
+                    out.println("250 State reset");
+                } else if (command.equals("NOOP")) {
+                    out.println("250 Still here");
+                } else if (command.equals("QUIT")) {
+                    out.println("221 " + getServerName() + " closing connection");
+                    break;
+                } else if (command.startsWith("VRFY ")) {
+                    String userToVerify = inputLine.substring(5).trim();
+                    if (Mailbox.isValidUser(userToVerify)) {
+                        out.println("250 " + userToVerify + " found");
+                    } else {
+                        out.println("550 User not found");
+                    }
+                } else {
+                    out.println("501 Unknown or unsupported command");
                 }
-
-                // Attempt to write message to mailboxes
-                try (MailWriter writer = new MailWriter(recipientMailboxes)) {
-                    writer.write(messageData.toString());
-                    writer.flush();
-                } catch (IOException e) {
-                    System.err.println("Failed to write to mailboxes: " + e.getMessage());
-                    socketOut.println("451 Requested action aborted: error writing to mailboxes");
-                    resetState(); // reset state even on error
-                    return;
-                }
-
-                // Successfully delivered
-                socketOut.println("250 OK");
-                resetState();
-            } else {
-                // Dot-stuffing: if line starts with two dots, reduce to one
-                if (inputLine.startsWith("..")) {
-                    inputLine = inputLine.substring(1);
-                }
-
-                // Accumulate the input line into message data buffer
-                messageData.append(inputLine).append("\r\n");
             }
-
-        } catch (Exception e) {
-            System.err.println("Unexpected error in handleData: " + e.getMessage());
-            socketOut.println("451 Requested action aborted: internal error");
-            resetState();
+        } catch (IOException e) {
+            System.err.println("Connection error while serving client.");
         }
     }
 
-    private String extractEmailAddress(String argument) {
-        if (argument == null) return null;
-
-        argument = argument.replaceAll("^(?i)(MAIL FROM:|RCPT TO:)\\s*", "");
-
-        if (argument.startsWith("<") && argument.endsWith(">")) {
-            argument = argument.substring(1, argument.length() - 1).trim();
-        }
-
-        if (!EMAIL_PATTERN.matcher(argument).matches()) {
-            return null;
-        }
-
-        return argument;
+    private static String extractAddress(String line) {
+        int start = line.indexOf('<') + 1;
+        int end = line.indexOf('>');
+        return line.substring(start, end);
     }
 
-    private void resetState() {
-        sender = null;
-        recipients.clear();
-        messageData = new StringBuilder();
-        waitingForData = false;
-        messageData.setLength(0);
-    }
-
-    /**
-     * Retrieves the name of the current host. Used in the response of commands like HELO and EHLO.
-     * @return A string corresponding to the name of the current host.
-     */
-    private static String getHostName() {
+    private static String getServerName() {
         try {
             return InetAddress.getLocalHost().getHostName();
         } catch (UnknownHostException e) {
-            try (BufferedReader reader = Runtime.getRuntime().exec(new String[] {"hostname"}).inputReader()) {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                    Runtime.getRuntime().exec("hostname").getInputStream()))) {
                 return reader.readLine();
             } catch (IOException ex) {
                 return "unknown_host";
@@ -340,32 +150,22 @@ public class MySMTPServer extends Thread {
         }
     }
 
-    /**
-     * Main process for the SMTP server. Handles the argument parsing and creates a listening server socket. Repeatedly
-     * accepts new connections from individual clients, creating a new server instance that handles communication with
-     * that client in a separate thread.
-     *
-     * @param args The command-line arguments.
-     * @throws IOException In case of an exception creating the server socket or accepting new connections.
-     */
     public static void main(String[] args) throws IOException {
-
         if (args.length != 1) {
-            throw new RuntimeException("This application must be executed with exactly one argument, the listening port.");
+            throw new IllegalArgumentException("Usage: java MySMTPServer <port>");
         }
 
-        try (ServerSocket serverSocket = new ServerSocket(Integer.parseInt(args[0]))) {
-            serverSocket.setReuseAddress(true);
-            System.out.println("Waiting for connections on port " + serverSocket.getLocalPort() + "...");
-            //noinspection InfiniteLoopStatement
+        int port = Integer.parseInt(args[0]);
+
+        try (ServerSocket server = new ServerSocket(port)) {
+            server.setReuseAddress(true);
+            System.out.println("SMTP server started on port " + port);
             while (true) {
-                Socket socket = serverSocket.accept();
-                System.out.println("Accepted a connection from " + socket.getRemoteSocketAddress());
+                Socket client = server.accept();
                 try {
-                    MySMTPServer handler = new MySMTPServer(socket);
-                    handler.start();
+                    new MySMTPServer(client).start();
                 } catch (IOException e) {
-                    System.err.println("Error setting up an individual client's handler.");
+                    System.err.println("Error initializing client handler.");
                     e.printStackTrace();
                 }
             }
